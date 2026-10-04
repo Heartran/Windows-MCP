@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windows PowerShell</title>
+<style>
+  :root {
+    --chrome-bg: #202020;
+    --chrome-fg: #e6e6e6;
+    --chrome-muted: #a8a8a8;
+    --chrome-border: #3a3a3a;
+    --term-bg: #012456;
+    --term-fg: #eeedf0;
+    --term-cmd: #f9f1a5;
+    --term-err: #ff8a8a;
+    --term-dim: #9fb3d9;
+    --ok: #16c60c;
+    --bad: #e74856;
+    --warn: #f9f1a5;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --chrome-bg: #f3f3f3;
+    --chrome-fg: #1b1b1b;
+    --chrome-muted: #5c5c5c;
+    --chrome-border: #d9d9d9;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: var(--chrome-fg);
+    padding: 2px;
+  }
+  .window {
+    border: 1px solid var(--chrome-border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--term-bg);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  }
+  .titlebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    padding-left: 10px;
+    background: var(--chrome-bg);
+    color: var(--chrome-fg);
+    user-select: none;
+  }
+  .titlebar .icon { width: 16px; height: 16px; flex: none; }
+  .titlebar .title {
+    flex: 1;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .titlebar .controls { display: flex; height: 100%; }
+  .titlebar .controls span {
+    width: 44px;
+    display: grid;
+    place-items: center;
+    font-size: 10px;
+    opacity: 0.8;
+  }
+  .titlebar .controls .close:hover { background: #c42b1c; color: #fff; opacity: 1; }
+  .terminal {
+    font-family: "Cascadia Mono", "Cascadia Code", Consolas, "Lucida Console", monospace;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--term-fg);
+    padding: 10px 12px 8px;
+    max-height: 480px;
+    overflow: auto;
+  }
+  .terminal.expanded { max-height: none; }
+  pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    font: inherit;
+  }
+  .cmd { color: var(--term-cmd); }
+  .out { margin-top: 2px; }
+  .out.err { color: var(--term-err); }
+  .out.dim { color: var(--term-dim); font-style: italic; }
+  .cursor {
+    display: inline-block;
+    width: 8px;
+    height: 1.05em;
+    vertical-align: text-bottom;
+    background: var(--term-fg);
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .statusbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 10px;
+    background: var(--chrome-bg);
+    color: var(--chrome-muted);
+    font-size: 11.5px;
+    border-top: 1px solid var(--chrome-border);
+    flex-wrap: wrap;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 9px;
+    border-radius: 999px;
+    font-weight: 600;
+    color: var(--chrome-fg);
+    background: rgba(127, 127, 127, 0.18);
+  }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: #888; }
+  .badge.ok .dot { background: var(--ok); }
+  .badge.bad .dot { background: var(--bad); }
+  .badge.run .dot { background: var(--warn); animation: blink 1s steps(1) infinite; }
+  .spacer { flex: 1; }
+  button {
+    font: inherit;
+    font-size: 11.5px;
+    padding: 2px 9px;
+    border-radius: 4px;
+    border: 1px solid var(--chrome-border);
+    background: transparent;
+    color: var(--chrome-fg);
+    cursor: pointer;
+  }
+  button:hover { background: rgba(127, 127, 127, 0.18); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="window" id="window">
+  <div class="titlebar">
+    <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect width="16" height="16" rx="3" fill="#2671e5"/>
+      <path d="M4 4.5 7.5 8 4 11.5" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M8.5 11.5H12" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>
+    <div class="title" id="title">Windows PowerShell</div>
+    <div class="controls" aria-hidden="true"><span>&#x2500;</span><span>&#x25A1;</span><span class="close">&#x2715;</span></div>
+  </div>
+  <div class="terminal" id="terminal">
+    <pre><span id="prompt">PS&gt; </span><span class="cmd" id="cmd"></span><span class="cursor" id="cursor"></span></pre>
+    <pre class="out hidden" id="out"></pre>
+  </div>
+  <div class="statusbar">
+    <span class="badge run" id="badge"><span class="dot"></span><span id="badgeText">Running</span></span>
+    <span id="meta"></span>
+    <span class="spacer"></span>
+    <button id="expand" class="hidden" type="button">Expand</button>
+    <button id="copyCmd" type="button">Copy command</button>
+    <button id="copyOut" class="hidden" type="button">Copy output</button>
+  </div>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  // MCP Apps (io.modelcontextprotocol/ui) JSON-RPC over postMessage.
+  var PROTOCOL_VERSION = "2026-01-26";
+  var APP_INFO = { name: "windows-mcp-powershell", version: "1.0.0" };
+  var INIT_ID = 1;
+
+  var state = {
+    command: "",
+    timeout: null,
+    cwd: null,
+    output: null,
+    statusCode: null,
+    durationMs: null,
+    phase: "running" // running | done | error | cancelled
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  var els = {
+    window: $("window"),
+    terminal: $("terminal"),
+    prompt: $("prompt"),
+    cmd: $("cmd"),
+    cursor: $("cursor"),
+    out: $("out"),
+    badge: $("badge"),
+    badgeText: $("badgeText"),
+    meta: $("meta"),
+    expand: $("expand"),
+    copyCmd: $("copyCmd"),
+    copyOut: $("copyOut")
+  };
+
+  function post(message) {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage(message, "*");
+    }
+  }
+
+  function notify(method, params) {
+    post({ jsonrpc: "2.0", method: method, params: params || {} });
+  }
+
+  // ---- rendering -------------------------------------------------------
+
+  function normalizeOutput(text) {
+    if (text === null || text === undefined) { return ""; }
+    return String(text).replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+  }
+
+  function render() {
+    els.prompt.textContent = state.cwd ? "PS " + state.cwd + "> " : "PS> ";
+    els.cmd.textContent = state.command || "";
+
+    var running = state.phase === "running";
+    els.cursor.classList.toggle("hidden", !running);
+
+    els.badge.className = "badge";
+    els.out.className = "out";
+    var output = normalizeOutput(state.output);
+
+    if (running) {
+      els.badge.classList.add("run");
+      els.badgeText.textContent = "Running";
+      els.out.classList.add("hidden");
+    } else if (state.phase === "cancelled") {
+      els.badge.classList.add("bad");
+      els.badgeText.textContent = "Cancelled";
+      els.out.classList.add("dim");
+      els.out.textContent = output || "The command was cancelled before it produced a result.";
+    } else if (state.phase === "error") {
+      els.badge.classList.add("bad");
+      els.badgeText.textContent = "Tool error";
+      els.out.classList.add("err");
+      els.out.textContent = output || "The tool call failed.";
+    } else {
+      var ok = state.statusCode === 0;
+      els.badge.classList.add(ok ? "ok" : "bad");
+      els.badgeText.textContent = "Exit code " + (state.statusCode === null ? "?" : state.statusCode);
+      if (!ok) { els.out.classList.add("err"); }
+      if (output === "") {
+        els.out.classList.add("dim");
+        els.out.textContent = "(no output)";
+      } else {
+        els.out.textContent = output;
+      }
+    }
+
+    var meta = [];
+    if (state.durationMs !== null && state.durationMs !== undefined) {
+      meta.push(formatDuration(state.durationMs));
+    }
+    if (state.timeout !== null && state.timeout !== undefined) {
+      meta.push("timeout " + state.timeout + "s");
+    }
+    els.meta.textContent = meta.join(" · ");
+
+    els.copyOut.classList.toggle("hidden", running || output === "");
+    updateExpand();
+    reportSize();
+  }
+
+  function formatDuration(ms) {
+    if (ms < 1000) { return ms + " ms"; }
+    return (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + " s";
+  }
+
+  function updateExpand() {
+    var t = els.terminal;
+    var overflowing = t.classList.contains("expanded") || t.scrollHeight > t.clientHeight + 1;
+    els.expand.classList.toggle("hidden", !overflowing);
+    els.expand.textContent = t.classList.contains("expanded") ? "Collapse" : "Expand";
+  }
+
+  var initialized = false;
+  var lastSize = { width: 0, height: 0 };
+  function reportSize() {
+    if (!initialized) { return; }
+    var rect = els.window.getBoundingClientRect();
+    var width = Math.ceil(rect.width) + 4;
+    var height = Math.ceil(rect.height) + 4;
+    if (width === lastSize.width && height === lastSize.height) { return; }
+    lastSize = { width: width, height: height };
+    notify("ui/notifications/size-changed", { width: width, height: height });
+  }
+
+  // ---- result parsing --------------------------------------------------
+
+  var TEXT_PATTERN = /^Response: ([\s\S]*)\nStatus Code: (-?\d+)\s*$/;
+
+  function textOf(content) {
+    if (!Array.isArray(content)) { return ""; }
+    return content
+      .filter(function (block) { return block && block.type === "text" && typeof block.text === "string"; })
+      .map(function (block) { return block.text; })
+      .join("\n");
+  }
+
+  function applyToolResult(params) {
+    params = params || {};
+    var sc = params.structuredContent;
+    if (sc && typeof sc === "object" && ("output" in sc || "status_code" in sc)) {
+      if (typeof sc.command === "string") { state.command = sc.command; }
+      if (sc.timeout !== undefined) { state.timeout = sc.timeout; }
+      if (typeof sc.cwd === "string") { state.cwd = sc.cwd; }
+      state.output = sc.output;
+      state.statusCode = typeof sc.status_code === "number" ? sc.status_code : null;
+      state.durationMs = typeof sc.duration_ms === "number" ? sc.duration_ms : null;
+      state.phase = params.isError ? "error" : "done";
+      render();
+      return;
+    }
+    var text = textOf(params.content);
+    if (params.isError) {
+      state.output = text;
+      state.phase = "error";
+      render();
+      return;
+    }
+    var match = TEXT_PATTERN.exec(text);
+    if (match) {
+      state.output = match[1];
+      state.statusCode = parseInt(match[2], 10);
+    } else {
+      state.output = text;
+      state.statusCode = null;
+    }
+    state.phase = "done";
+    render();
+  }
+
+  function applyToolInput(params) {
+    var args = (params && params.arguments) || {};
+    if (typeof args.command === "string") { state.command = args.command; }
+    if (args.timeout !== undefined && args.timeout !== null) { state.timeout = args.timeout; }
+    render();
+  }
+
+  function applyHostContext(ctx) {
+    if (!ctx) { return; }
+    if (ctx.theme === "light" || ctx.theme === "dark") {
+      document.documentElement.setAttribute("data-theme", ctx.theme);
+    }
+    var dims = ctx.containerDimensions;
+    if (dims && typeof dims.maxHeight === "number" && dims.maxHeight > 0) {
+      // Leave room for the title and status bars inside the host's budget.
+      var budget = Math.max(160, dims.maxHeight - 80);
+      els.terminal.style.maxHeight = els.terminal.classList.contains("expanded") ? "" : Math.min(480, budget) + "px";
+    }
+    reportSize();
+  }
+
+  // ---- host messaging --------------------------------------------------
+
+  window.addEventListener("message", function (event) {
+    var msg = event.data;
+    if (!msg || msg.jsonrpc !== "2.0") { return; }
+
+    // Response to our ui/initialize request.
+    if (msg.id === INIT_ID && !msg.method) {
+      if (msg.result) {
+        applyHostContext(msg.result.hostContext);
+      }
+      initialized = true;
+      notify("ui/notifications/initialized", {});
+      render();
+      return;
+    }
+
+    switch (msg.method) {
+      case "ui/notifications/tool-input":
+      case "ui/notifications/tool-input-partial":
+        applyToolInput(msg.params);
+        break;
+      case "ui/notifications/tool-result":
+        applyToolResult(msg.params);
+        break;
+      case "ui/notifications/tool-cancelled":
+        state.phase = "cancelled";
+        state.output = msg.params && msg.params.reason ? String(msg.params.reason) : "";
+        render();
+        break;
+      case "ui/notifications/host-context-changed":
+        applyHostContext(msg.params);
+        break;
+      default:
+        // Any host request we do not implement (e.g. ui/resource-teardown)
+        // gets an empty success so the host never waits on us.
+        if (msg.id !== undefined && msg.id !== null && msg.method) {
+          post({ jsonrpc: "2.0", id: msg.id, result: {} });
+        }
+    }
+  });
+
+  // ---- buttons ---------------------------------------------------------
+
+  function copyText(text, button) {
+    var label = button.textContent;
+    function done(ok) {
+      button.textContent = ok ? "Copied" : "Copy failed";
+      setTimeout(function () { button.textContent = label; }, 1200);
+    }
+    function fallback() {
+      try {
+        var area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        var ok = document.execCommand("copy");
+        document.body.removeChild(area);
+        done(ok);
+      } catch (e) {
+        done(false);
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  els.copyCmd.addEventListener("click", function () { copyText(state.command || "", els.copyCmd); });
+  els.copyOut.addEventListener("click", function () { copyText(normalizeOutput(state.output), els.copyOut); });
+  els.expand.addEventListener("click", function () {
+    els.terminal.classList.toggle("expanded");
+    if (els.terminal.classList.contains("expanded")) { els.terminal.style.maxHeight = ""; }
+    updateExpand();
+    reportSize();
+  });
+
+  if (window.ResizeObserver) {
+    new ResizeObserver(function () { reportSize(); }).observe(els.window);
+  }
+  window.addEventListener("resize", reportSize);
+
+  // ---- handshake -------------------------------------------------------
+
+  render();
+  post({
+    jsonrpc: "2.0",
+    id: INIT_ID,
+    method: "ui/initialize",
+    params: {
+      protocolVersion: PROTOCOL_VERSION,
+      appInfo: APP_INFO,
+      appCapabilities: {}
+    }
+  });
+})();
+</script>
+</body>
+</html>

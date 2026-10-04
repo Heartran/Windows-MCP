@@ -14,7 +14,11 @@ from fastmcp import Client, FastMCP
 
 from windows_mcp.desktop.control import ControlBlocked, ControlCoordinator, current_token
 from windows_mcp.desktop.control_ledger import InputLedger
-from windows_mcp.tools.control_notifications import ControlNotifier, ControlToolGate
+from windows_mcp.tools.control_notifications import (
+    CONTROL_EXEMPT_TOOLS,
+    ControlNotifier,
+    ControlToolGate,
+)
 
 
 def _legacy_notification_client(transport, **kwargs):
@@ -89,6 +93,56 @@ async def test_gate_blocks_dynamic_tools_but_status_remains_available():
         assert effects == [7]
         assert current_token.get() is None
         assert controller.calls == [("begin", "DynamicTool"), ("end", 7)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", sorted(CONTROL_EXEMPT_TOOLS - {"ControlStatus"}))
+async def test_tools_that_never_touch_input_run_during_user_control(tool_name):
+    """Typing a prompt is physical input; it must not hold back a shell command."""
+    controller = FakeController()
+    mcp = FastMCP("test")
+    mcp.add_middleware(ControlToolGate(controller, ControlNotifier(controller)))
+    effects = []
+
+    @mcp.tool(name=tool_name)
+    def exempt_tool():
+        effects.append(current_token.get())
+        return "executed"
+
+    @mcp.tool(name="Click")
+    def click():
+        return "clicked"
+
+    async with Client(mcp) as client:
+        controller.state = "user"
+        result = await client.call_tool(tool_name)
+        assert "executed" in str(result.content)
+        blocked = await client.call_tool("Click", raise_on_error=False)
+        assert blocked.is_error
+        assert "USER_CONTROL" in str(blocked.content)
+    # No lease was taken or released for the exempt tool, and no token leaked.
+    assert effects == [None]
+    assert controller.calls == []
+
+
+def test_exempt_tools_never_inject_input_or_touch_the_desktop():
+    """The allowlist is the contract: desktop-facing tools stay behind the gate."""
+    desktop_facing = {
+        "App",
+        "Click",
+        "Type",
+        "Scroll",
+        "Move",
+        "Shortcut",
+        "MultiSelect",
+        "MultiEdit",
+        "Screenshot",
+        "Snapshot",
+        "WaitFor",
+        "Scrape",
+    }
+    assert not (CONTROL_EXEMPT_TOOLS & desktop_facing)
+    assert "ControlStatus" in CONTROL_EXEMPT_TOOLS
 
 
 @pytest.mark.asyncio
@@ -187,7 +241,7 @@ async def test_cancelled_active_and_queued_calls_release_gate_and_lease():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_name", ["App", "PowerShell"])
+@pytest.mark.parametrize("tool_name", ["App", "Snapshot"])
 async def test_already_running_external_command_is_not_claimed_cancelled(tool_name):
     controller = FakeController()
     mcp = FastMCP("test")

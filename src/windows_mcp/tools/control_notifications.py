@@ -14,6 +14,25 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 logger = logging.getLogger(__name__)
 
+# Tools that never inject mouse or keyboard input and never touch the desktop
+# UI, its overlay, or the screen: they run in the server process or in a child
+# process, so the user keeping their hands on the keyboard is no reason to hold
+# them back. Everything else (input injection, window management, screen and
+# tree capture) needs the AI control lease and stays behind the gate.
+CONTROL_EXEMPT_TOOLS: frozenset[str] = frozenset(
+    {
+        "ControlStatus",
+        "Clipboard",
+        "DisplayInventory",
+        "FileSystem",
+        "Notification",
+        "PowerShell",
+        "Process",
+        "Registry",
+        "Wait",
+    }
+)
+
 
 @dataclass
 class _Session:
@@ -160,7 +179,13 @@ class ControlNotifier:
 
 
 class ControlToolGate(Middleware):
-    """All present and future MCP tools use the same ownership decision."""
+    """Desktop-facing MCP tools share one ownership decision.
+
+    Tools listed in ``CONTROL_EXEMPT_TOOLS`` bypass the gate: they never move
+    the mouse, press keys, or touch windows and the screen, so they run even
+    while the user is typing. Every other tool, present or future, waits for
+    the AI control lease.
+    """
 
     def __init__(self, controller: Any, notifier: ControlNotifier) -> None:
         self.controller = controller
@@ -203,7 +228,7 @@ class ControlToolGate(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next: Callable) -> Any:
         self.notifier.remember(context)
         name = context.message.name
-        if name == "ControlStatus":
+        if name in CONTROL_EXEMPT_TOOLS:
             return await call_next(context)
         # Waiting behind an already running external command must not hide a
         # user takeover. Poll ownership while waiting, then recheck under lock.

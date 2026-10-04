@@ -20,6 +20,13 @@ class FakeMCP:
 
         return decorator
 
+    def resource(self, uri: str, **kwargs: object) -> Callable:
+        # MCP App views are resources, not tools; the manifest does not list them.
+        def decorator(func: Callable) -> Callable:
+            return func
+
+        return decorator
+
 
 def test_manifest_lists_every_registered_tool() -> None:
     mcp = FakeMCP()

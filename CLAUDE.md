@@ -37,6 +37,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 
 **Tools layer** — `tools/`: One module per tool group, each exposing `register(mcp, *, get_desktop, get_analytics)`. `tools/__init__.py` holds the module list and `register_all()`. Tool functions are thin — they normalize arguments and delegate to a service package. The `@with_analytics` decorator wraps each one for telemetry, making it the existing precedent for cross-cutting concerns at the tool boundary.
 
+**MCP App views** — `tools/ui/`: HTML pages served as `ui://` resources (MIME `text/html;profile=mcp-app`) for hosts that implement the MCP Apps extension, such as Claude Desktop and claude.ai. A tool opts in with `app=AppConfig(resource_uri=...)` on its `@mcp.tool(...)`, which FastMCP turns into `_meta.ui.resourceUri`; the host then renders the page in a sandboxed iframe and feeds it the tool arguments and result over JSON-RPC `postMessage` (`ui/notifications/tool-input`, `ui/notifications/tool-result`). Today only `PowerShell` has a view (`powershell.html`, a terminal-window rendering of command, output, exit code and duration); its result keeps the legacy `Response: ...\nStatus Code: N` text block and adds the same data as structured content for the page. Pages must be self-contained (inline CSS/JS, no external origins) and are shipped via `[tool.setuptools.package-data]`. Hosts without MCP Apps ignore the metadata and show the text.
+
 **Desktop service** — `desktop/service.py`: High-level orchestrator. Manages window operations (launch, resize, switch), screenshots, mouse/keyboard actions, and clipboard. Interfaces with Tree service for UI element discovery. `desktop/views.py` defines data models: `DesktopState`, `Window`, `Size`, `BoundingBox`, `Status`.
 
 **Tree service** — `tree/service.py`: Captures the Windows accessibility tree from active and background windows. Identifies interactive elements and scrollable areas. Uses `ThreadPoolExecutor` for multi-threaded UI traversal. `tree/views.py` defines `TreeElementNode`, `ScrollElementNode`, `TreeState`. `tree/config.py` has control type configurations.
@@ -82,6 +84,7 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_WATCHDOG` | _(off)_ | Set to `on`/`1`/`true`/`yes`/`enabled` to start the UIA focus WatchDog thread. Unset, or any other value, leaves it off. Opt-in because it only emits debug logging today but can crash the server via the UIA event pump (#332). Resolved in `__main__.py`. |
 | `WINDOWS_MCP_DEBUG` | `false` | Set to `1`/`true`/`yes`/`on` to enable debug mode. Checked in `config.py`. Also available as `--debug` CLI flag. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(off)_ | Set to `1`/`true`/`yes`/`on` to suppress the orange-red glowing border that briefly appears after every screenshot. Resolved in `desktop/flash_overlay.py`. |
+| `WINDOWS_MCP_POWERSHELL_UI` | `on` | Set to `off`/`0`/`false`/`no`/`disabled` to stop the `PowerShell` tool from registering and advertising its MCP App view. Resolved in `tools/ui/__init__.py`. |
 
 ## Security Context
 

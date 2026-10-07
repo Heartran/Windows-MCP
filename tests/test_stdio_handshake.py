@@ -99,6 +99,26 @@ async def test_handshake_completes_and_lists_tools() -> None:
     assert {tool.name for tool in tools} == EXPECTED_TOOLS
 
 
+async def test_legacy_handshake_still_advertises_mcp_apps() -> None:
+    """The UI extension must be visible to a client stuck on a pre-2026 era.
+
+    Claude Desktop pins local (stdio) extensions to the legacy handshake, and
+    the SDK's version sieve strips ``capabilities.extensions`` there. The
+    server therefore also declares the MCP Apps extension under
+    ``capabilities.experimental``, which the sieve leaves alone.
+    """
+    import inspect
+
+    kwargs = {"mode": "legacy"} if "mode" in inspect.signature(Client).parameters else {}
+    async with Client(_transport(), **kwargs) as client:
+        await asyncio.wait_for(client.list_tools(), STARTUP_TIMEOUT)
+        result = client.initialize_result
+
+    assert result is not None, "legacy mode should complete an initialize handshake"
+    experimental = result.capabilities.experimental or {}
+    assert "io.modelcontextprotocol/ui" in experimental
+
+
 async def test_tool_call_round_trips_over_stdio() -> None:
     """A tool call survives the full client -> pipe -> server -> pipe path.
 

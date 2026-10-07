@@ -18,6 +18,7 @@ except ImportError:  # fastmcp not on the test platform
 
 pytestmark = pytest.mark.skipif(FastMCP is None, reason="fastmcp not installed")
 
+from windows_mcp.tools.shell import POWERSHELL_RESULT_META_KEY  # noqa: E402
 from windows_mcp.tools.ui import (  # noqa: E402
     POWERSHELL_UI_ENV,
     POWERSHELL_UI_URI,
@@ -98,7 +99,7 @@ def test_ui_page_speaks_the_mcp_apps_protocol():
     assert "<link " not in html
 
 
-def test_result_keeps_text_block_and_adds_structured_content(monkeypatch):
+def test_result_keeps_text_block_and_carries_typed_fields_in_meta(monkeypatch):
     server = _server(monkeypatch)
     calls = _fake_executor(monkeypatch, "hello\r\n", 0)
 
@@ -106,13 +107,27 @@ def test_result_keeps_text_block_and_adds_structured_content(monkeypatch):
 
     assert calls == [("Get-Date", 5)]
     assert [block.text for block in result.content] == ["Response: hello\r\n\nStatus Code: 0"]
-    structured = result.structured_content
-    assert structured["command"] == "Get-Date"
-    assert structured["timeout"] == 5
-    assert structured["output"] == "hello\r\n"
-    assert structured["status_code"] == 0
-    assert isinstance(structured["cwd"], str) and structured["cwd"]
-    assert isinstance(structured["duration_ms"], int) and structured["duration_ms"] >= 0
+    # No structured content: hosts without the view would show it as raw JSON
+    # instead of the text block.
+    assert result.structured_content is None
+    fields = result.meta[POWERSHELL_RESULT_META_KEY]
+    assert fields["command"] == "Get-Date"
+    assert fields["timeout"] == 5
+    assert fields["output"] == "hello\r\n"
+    assert fields["status_code"] == 0
+    assert isinstance(fields["cwd"], str) and fields["cwd"]
+    assert isinstance(fields["duration_ms"], int) and fields["duration_ms"] >= 0
+
+
+def test_meta_key_reaches_the_wire_and_the_page_reads_it(monkeypatch):
+    server = _server(monkeypatch)
+    _fake_executor(monkeypatch, "ok", 0)
+
+    result = asyncio.run(server.call_tool("PowerShell", {"command": "echo ok"}))
+    wire = result.to_mcp_result()
+    assert wire.meta[POWERSHELL_RESULT_META_KEY]["output"] == "ok"
+    assert wire.structured_content is None
+    assert f'"{POWERSHELL_RESULT_META_KEY}"' in load_powershell_ui()
 
 
 def test_non_zero_exit_code_is_reported_verbatim(monkeypatch):
@@ -122,8 +137,9 @@ def test_non_zero_exit_code_is_reported_verbatim(monkeypatch):
     result = asyncio.run(server.call_tool("PowerShell", {"command": "Stop-Service x"}))
 
     assert result.content[0].text == "Response: Access is denied\nStatus Code: 1"
-    assert result.structured_content["status_code"] == 1
-    assert result.structured_content["timeout"] == 30
+    fields = result.meta[POWERSHELL_RESULT_META_KEY]
+    assert fields["status_code"] == 1
+    assert fields["timeout"] == 30
 
 
 def test_ui_can_be_switched_off(monkeypatch):
@@ -133,11 +149,12 @@ def test_ui_can_be_switched_off(monkeypatch):
     assert not (tool.meta or {}).get("ui")
     assert POWERSHELL_UI_URI not in {str(r.uri) for r in asyncio.run(server.list_resources())}
 
-    # The structured result stays: it is harmless for hosts without MCP Apps.
+    # The result shape does not change: text block plus _meta, no structured content.
     _fake_executor(monkeypatch, "ok", 0)
     result = asyncio.run(server.call_tool("PowerShell", {"command": "echo ok"}))
     assert result.content[0].text == "Response: ok\nStatus Code: 0"
-    assert result.structured_content["output"] == "ok"
+    assert result.structured_content is None
+    assert result.meta[POWERSHELL_RESULT_META_KEY]["output"] == "ok"
 
 
 @pytest.mark.parametrize(

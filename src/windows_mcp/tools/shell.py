@@ -18,6 +18,17 @@ from windows_mcp.tools.ui import (
 )
 
 
+POWERSHELL_RESULT_META_KEY = "windows-mcp/powershell"
+"""``_meta`` key under which a PowerShell result carries its typed fields.
+
+The MCP App view reads them from the ``_meta`` of the ``tool-result``
+notification. They deliberately do not travel as ``structuredContent``: hosts
+that do not render the view (Claude Desktop's unified Chat/Cowork surface, for
+one) display structured content as raw JSON in place of the text block, while
+``_meta`` is never shown as the result body.
+"""
+
+
 def build_powershell_result(
     command: str,
     timeout: int,
@@ -28,9 +39,9 @@ def build_powershell_result(
     """Wrap a PowerShell run as a tool result.
 
     The text block keeps the historical ``Response: ...\\nStatus Code: N`` layout
-    that models and clients already parse. The structured content carries the
-    same data as typed fields for the MCP App view (and any client that prefers
-    JSON over scraping the text).
+    that models and clients already parse, and is the only visible content. The
+    same data travels as typed fields under ``_meta[POWERSHELL_RESULT_META_KEY]``
+    for the MCP App view.
 
     Args:
         command: The PowerShell command that was executed.
@@ -40,18 +51,20 @@ def build_powershell_result(
         duration_ms: Wall-clock duration of the run in milliseconds.
 
     Returns:
-        A ``ToolResult`` with one text block and structured content.
+        A ``ToolResult`` with one text block and result metadata.
     """
     text = f"Response: {response}\nStatus Code: {status_code}"
     return ToolResult(
         content=[TextContent(type="text", text=text)],
-        structured_content={
-            "command": command,
-            "timeout": timeout,
-            "cwd": os.path.expanduser("~"),
-            "output": response,
-            "status_code": status_code,
-            "duration_ms": duration_ms,
+        meta={
+            POWERSHELL_RESULT_META_KEY: {
+                "command": command,
+                "timeout": timeout,
+                "cwd": os.path.expanduser("~"),
+                "output": response,
+                "status_code": status_code,
+                "duration_ms": duration_ms,
+            }
         },
     )
 

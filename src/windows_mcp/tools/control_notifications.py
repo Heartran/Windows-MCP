@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -13,25 +14,6 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 logger = logging.getLogger(__name__)
-
-# Tools that never inject mouse or keyboard input and never touch the desktop
-# UI, its overlay, or the screen: they run in the server process or in a child
-# process, so the user keeping their hands on the keyboard is no reason to hold
-# them back. Everything else (input injection, window management, screen and
-# tree capture) needs the AI control lease and stays behind the gate.
-CONTROL_EXEMPT_TOOLS: frozenset[str] = frozenset(
-    {
-        "ControlStatus",
-        "Clipboard",
-        "DisplayInventory",
-        "FileSystem",
-        "Notification",
-        "PowerShell",
-        "Process",
-        "Registry",
-        "Wait",
-    }
-)
 
 
 @dataclass
@@ -179,13 +161,7 @@ class ControlNotifier:
 
 
 class ControlToolGate(Middleware):
-    """Desktop-facing MCP tools share one ownership decision.
-
-    Tools listed in ``CONTROL_EXEMPT_TOOLS`` bypass the gate: they never move
-    the mouse, press keys, or touch windows and the screen, so they run even
-    while the user is typing. Every other tool, present or future, waits for
-    the AI control lease.
-    """
+    """Apply one configured ownership policy at the MCP boundary."""
 
     def __init__(self, controller: Any, notifier: ControlNotifier) -> None:
         self.controller = controller
@@ -228,7 +204,20 @@ class ControlToolGate(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next: Callable) -> Any:
         self.notifier.remember(context)
         name = context.message.name
-        if name in CONTROL_EXEMPT_TOOLS:
+        if name == "ControlStatus":
+            return await call_next(context)
+        if not self.controller.enabled:
+            # Explicit opt-out only: a failed enabled controller still fails closed.
+            # Keep shared desktop operations serialized, without creating a lease.
+            async with self._call_lock:
+                return await call_next(context)
+        from windows_mcp.tools.control_policy import requires_control
+
+        if not requires_control(
+            self.controller.policy, name, getattr(context.message, "arguments", None)
+        ):
+            # Background work neither waits for the desktop lock nor creates a lease.
+            # Resource-specific serialization (such as the UIA worker) still applies.
             return await call_next(context)
         # Waiting behind an already running external command must not hide a
         # user takeover. Poll ownership while waiting, then recheck under lock.
@@ -265,12 +254,17 @@ class ControlToolGate(Middleware):
             from windows_mcp.desktop.control_context import (
                 current_token,
                 current_steps,
+                current_request_closed,
                 StepCounter,
                 get_step_count,
             )
 
             context_token = current_token.set(token)
             steps_token = current_steps.set(StepCounter())
+            # A worker may outlive this await. Revoke only this request, not the
+            # shared ownership generation used by subsequent calls.
+            request_closed = threading.Event()
+            request_marker = current_request_closed.set(request_closed)
             try:
                 # A synchronous indicator failure can invalidate the lease
                 # during begin_call's state notification.
@@ -293,6 +287,8 @@ class ControlToolGate(Middleware):
                     raise self._blocked(ControlBlocked(code, status)) from exc
                 raise
             finally:
+                request_closed.set()
+                current_request_closed.reset(request_marker)
                 current_steps.reset(steps_token)
                 current_token.reset(context_token)
                 self.controller.end_call(token)

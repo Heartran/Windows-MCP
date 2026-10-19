@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,8 +42,11 @@ class ToolsConfig:
 @dataclass
 class ControlConfig:
     # Raw relative device units and hook screen pixels are intentionally separate.
-    mouse_takeover_units: int = 120
-    mouse_takeover_pixels: int = 120
+    mouse_takeover_units: int = 500
+    mouse_takeover_pixels: int = 500  # Accepted for compatibility; pixel fallback is disabled.
+    enabled: bool = True
+    idle_timeout_seconds: float = 10.0
+    policy: str = "relaxed"
 
 
 @dataclass
@@ -96,6 +100,19 @@ def _strict_int(raw: object, key: str) -> int:
     if isinstance(raw, int):
         return raw
     raise ValueError(f"{key} must be a TOML integer, not {type(raw).__name__}")
+
+
+def validate_idle_timeout(raw: object) -> float:
+    """Share finite, positive timeout validation between TOML and CLI inputs."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError("control.idle_timeout_seconds must be a finite positive number")
+    try:
+        value = float(raw)
+    except OverflowError:
+        raise ValueError("control.idle_timeout_seconds must be a finite positive number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("control.idle_timeout_seconds must be a finite positive number")
+    return value
 
 
 def load_config(path: Path | None) -> WindowsMCPConfig:
@@ -163,6 +180,16 @@ def load_config(path: Path | None) -> WindowsMCPConfig:
     if "exclude" in tools:
         cfg.tools.exclude = _list_of_strings(tools["exclude"], "tools.exclude")
 
+    if "policy" in control:
+        if control["policy"] not in ("relaxed", "balanced", "strict"):
+            raise ValueError("control.policy must be relaxed, balanced, or strict")
+        cfg.control.policy = control["policy"]
+
+    if "enabled" in control:
+        cfg.control.enabled = _strict_bool(control["enabled"], "control.enabled")
+    if "idle_timeout_seconds" in control:
+        cfg.control.idle_timeout_seconds = validate_idle_timeout(control["idle_timeout_seconds"])
+
     for key in ("mouse_takeover_units", "mouse_takeover_pixels"):
         if key in control:
             value = _strict_int(control[key], f"control.{key}")
@@ -224,6 +251,12 @@ def write_config(cfg: WindowsMCPConfig, path: Path) -> None:
         for key in ("mouse_takeover_units", "mouse_takeover_pixels")
         if getattr(ctrl, key) != getattr(default_ctrl, key)
     ]
+    if ctrl.policy != default_ctrl.policy:
+        control_lines.append(f'policy = "{ctrl.policy}"')
+    if ctrl.enabled != default_ctrl.enabled:
+        control_lines.append(f"enabled = {str(ctrl.enabled).lower()}")
+    if ctrl.idle_timeout_seconds != default_ctrl.idle_timeout_seconds:
+        control_lines.append(f"idle_timeout_seconds = {ctrl.idle_timeout_seconds}")
     if control_lines:
         lines += ["[control]", *control_lines, ""]
 

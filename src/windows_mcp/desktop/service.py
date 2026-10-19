@@ -1047,6 +1047,12 @@ class Desktop:
             raise ConnectionError(f"Failed to connect to {current_url}: {e}") from e
         except requests.exceptions.Timeout as e:
             raise TimeoutError(f"Request timed out for {current_url}: {e}") from e
+        has_charset = "charset" in response.headers.get("content-type", "").lower()
+        if not has_charset and response.encoding == "ISO-8859-1":
+            # requests assumes ISO-8859-1 for ``text/*`` without a charset
+            # (RFC 2616) and ignores the in-document ``<meta charset>``, so
+            # non-ASCII pages come back as mojibake. Sniff the body instead.
+            response.encoding = response.apparent_encoding or "utf-8"
         html = response.text
         content = markdownify(html=html)
         return content
@@ -1067,6 +1073,17 @@ class Desktop:
 
     def get_controls_handles(self, optimized: bool = False):
         handles = set()
+        own_pid = os.getpid()
+
+        def owned_by_this_server(hwnd) -> bool:
+            # The control overlay (7 WindowsMCPControl_* windows) and the click flashes live in this
+            # process. They are never a target, and the tree walk spends about a second on each one,
+            # which made every Snapshot and every after-state take ~15 s. A handle whose owner cannot
+            # be read is kept, as before.
+            try:
+                return win32process.GetWindowThreadProcessId(hwnd)[1] == own_pid
+            except Exception:
+                return False
 
         # For even more faster results (still under development)
         def callback(hwnd, _):
@@ -1076,6 +1093,7 @@ class Desktop:
                     win32gui.IsWindow(hwnd)
                     and win32gui.IsWindowVisible(hwnd)
                     and is_window_on_current_desktop(hwnd)
+                    and not owned_by_this_server(hwnd)
                 ):
                     handles.add(hwnd)
             except Exception:

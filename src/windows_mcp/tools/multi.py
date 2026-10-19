@@ -3,6 +3,7 @@
 import json
 
 from mcp.types import ToolAnnotations
+from windows_mcp.desktop.utils import as_bool as _as_bool
 from windows_mcp.infrastructure import with_analytics
 from fastmcp import Context
 
@@ -26,7 +27,7 @@ def register(mcp, *, get_desktop, get_analytics):
             openWorldHint=False,
         ),
     )
-    @with_analytics(get_analytics(), "Multi-Select-Tool")
+    @with_analytics(get_analytics(), "Multi-Select-Tool", run_sync_in_thread=False)
     def multi_select_tool(
         locs: list[list[int]] | str | None = None,
         labels: list[int] | str | None = None,
@@ -48,9 +49,7 @@ def register(mcp, *, get_desktop, get_analytics):
             except Exception as e:
                 raise ValueError(f"Failed to resolve labels {labels}: {e}")
 
-        press_ctrl = press_ctrl is True or (
-            isinstance(press_ctrl, str) and press_ctrl.lower() == "true"
-        )
+        press_ctrl = _as_bool(press_ctrl, "press_ctrl")
         desktop.multi_select(press_ctrl, locs)
         elements_str = "\n".join([f"({loc[0]},{loc[1]})" for loc in locs])
         return f"Multi-selected elements at:\n{elements_str}"
@@ -66,7 +65,7 @@ def register(mcp, *, get_desktop, get_analytics):
             openWorldHint=False,
         ),
     )
-    @with_analytics(get_analytics(), "Multi-Edit-Tool")
+    @with_analytics(get_analytics(), "Multi-Edit-Tool", run_sync_in_thread=False)
     def multi_edit_tool(
         locs: list[list] | str | None = None,
         labels: list[list] | str | None = None,

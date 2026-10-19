@@ -9,7 +9,7 @@ from windows_mcp.desktop import control, control_win32
 from windows_mcp.desktop.control_ledger import InputUnavailable
 
 
-def _fake_user32(handles, events):
+def _fake_user32(handles, events, on_idle=None):
     hooks = deque(handles)
 
     def install(kind, callback, instance, thread_id):
@@ -25,6 +25,11 @@ def _fake_user32(handles, events):
         events.append(("raw", count))
         return 1
 
+    def wait_for_input(count, handle, timeout, wake_mask, flags):
+        if on_idle is not None:
+            on_idle(timeout, wake_mask, flags)
+        return 0
+
     return SimpleNamespace(
         SetWindowsHookExW=install,
         UnhookWindowsHookEx=unhook,
@@ -37,17 +42,26 @@ def _fake_user32(handles, events):
         DefWindowProcW=lambda *args: 0,
         DestroyWindow=lambda hwnd: events.append(("destroy", hwnd)),
         UnregisterClassW=lambda *args: events.append(("unregister",)),
+        MsgWaitForMultipleObjectsEx=wait_for_input,
     )
 
 
 def _run_monitor(monkeypatch, handles, *, active=False):
     events = []
-    user32 = _fake_user32(handles, events)
+    waits = []
+    clock = [100.0]
+    owner = control.ControlCoordinator()
+
+    def advance(timeout, wake_mask, flags):
+        waits.append((timeout, wake_mask, flags))
+        clock[0] += 5.01
+        if len(waits) == 2:
+            owner._stop.set()
+
+    user32 = _fake_user32(handles, events, on_idle=advance)
     monkeypatch.setattr(control, "_user32", user32)
     monkeypatch.setattr(control_win32, "_user32", user32)
-    clock = [100.0]
     monkeypatch.setattr(control_win32.time, "monotonic", lambda: clock[0])
-    owner = control.ControlCoordinator()
     releases = []
     if active:
         with owner._lock:
@@ -59,17 +73,12 @@ def _run_monitor(monkeypatch, handles, *, active=False):
             lambda: releases.append("up"),
             lambda: False,
         )
-    sleeps = []
-
-    def advance(seconds):
-        sleeps.append(seconds)
-        clock[0] += 5.01
-        if len(sleeps) == 2:
-            owner._stop.set()
-
-    monkeypatch.setattr(control_win32.time, "sleep", advance)
+    # The idle path must block on Win32 input, never on a fixed sleep.
+    polling = []
+    monkeypatch.setattr(control_win32.time, "sleep", lambda seconds: polling.append(seconds))
     control_win32.run_input_monitor(owner)
-    return owner, events, sleeps, releases
+    assert polling == []
+    return owner, events, waits, releases
 
 
 def test_hook_rotation_replaces_only_after_both_installations(monkeypatch):
@@ -90,10 +99,35 @@ def test_hook_rotation_replaces_only_after_both_installations(monkeypatch):
     assert (owner._mouse_hook, owner._key_hook) == (21, 22)
 
 
-def test_input_monitor_rotates_after_interval_and_cleans_hooks(monkeypatch):
-    owner, events, sleeps, _ = _run_monitor(monkeypatch, [11, 12, 21, 22])
+def test_monitor_recovers_stale_hold_before_normal_tick(monkeypatch):
+    owner = control.ControlCoordinator()
+    owner._state = "user"
+    owner._last_user = owner._last_physical_event = 90.0
+    owner._pressed.add(0xA4)
+    clock, states, queries = [100.0], [], []
+
+    def advance(*args):
+        states.append(owner.status()["state"])
+        clock[0] += 0.101
+        if len(states) == 5:
+            owner._stop.set()
+
+    user32 = _fake_user32([11, 12], [], on_idle=advance)
+    user32.GetAsyncKeyState = lambda vk: queries.append(vk) or 0
+    monkeypatch.setattr(control, "_user32", user32)
+    monkeypatch.setattr(control_win32, "_user32", user32)
+    monkeypatch.setattr(control_win32.time, "monotonic", lambda: clock[0])
+    control_win32.run_input_monitor(owner)
     assert owner._startup_error is None
-    assert len(sleeps) == 2
+    assert states == ["user"] * 4 + ["ready"]
+    assert queries == [0xA4] * 5
+
+
+def test_input_monitor_rotates_after_interval_and_cleans_hooks(monkeypatch):
+    owner, events, waits, _ = _run_monitor(monkeypatch, [11, 12, 21, 22])
+    assert owner._startup_error is None
+    # The pump parks on the full input queue so queued input is never missed.
+    assert waits == [(10, 0x04FF, 0x0006), (10, 0x04FF, 0x0006)]
     assert events.index(("install", 14, 21)) < events.index(("unhook", 11))
     assert events.index(("install", 13, 22)) < events.index(("unhook", 12))
     assert events[-5:] == [
@@ -123,3 +157,44 @@ def test_input_monitor_rotation_failure_releases_physical_input(monkeypatch):
     assert releases == ["down", "up"]
     with pytest.raises(InputUnavailable):
         owner.input_ledger.press("key:shift", lambda: None, lambda: None, lambda: False)
+
+
+def test_pump_keeps_running_with_coordinator_locked(monkeypatch):
+    owner = control.ControlCoordinator()
+    owner._rotate = True
+    owner._state = "user"
+    owner._pressed.add(0xA0)
+    user32 = _fake_user32([11, 12, 21, 22], [], on_idle=lambda *args: owner._stop.set())
+    monkeypatch.setattr(control, "_user32", user32)
+    monkeypatch.setattr(control_win32, "_user32", user32)
+    monkeypatch.setattr(owner, "_handle", lambda event: pytest.fail("Coordination on hook pump"))
+    monkeypatch.setattr(
+        owner, "_recover_after_rehook", lambda: pytest.fail("Recovery on hook pump")
+    )
+    with owner._lock:
+        control_win32.run_input_monitor(owner)
+    assert owner._startup_error is None
+    assert owner._rehook_completed is owner._fault_token
+
+
+def test_new_fault_during_install_is_not_cleared_by_old_completion(monkeypatch):
+    owner = control.ControlCoordinator()
+    owner._fail_open()
+    old_fault = owner._fault_token
+    user32 = _fake_user32([11, 12, 21, 22], [], on_idle=lambda *args: owner._stop.set())
+    install = user32.SetWindowsHookExW
+
+    def fail_during_replacement(*args):
+        handle = install(*args)
+        if handle == 21:
+            owner._fail_open()
+        return handle
+
+    user32.SetWindowsHookExW = fail_during_replacement
+    monkeypatch.setattr(control, "_user32", user32)
+    monkeypatch.setattr(control_win32, "_user32", user32)
+    control_win32.run_input_monitor(owner)
+    assert owner._startup_error is None
+    assert owner._rotate and owner._emergency
+    assert owner._rehook_completed is old_fault
+    assert owner._rehook_completed is not owner._fault_token

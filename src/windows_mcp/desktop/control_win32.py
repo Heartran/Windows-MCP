@@ -1,11 +1,12 @@
 """Win32 structures, API bindings and desktop health for input ownership."""
 
 import ctypes
-import queue
 import threading
 import time
 from ctypes import wintypes
 from typing import Any
+
+from windows_mcp.desktop.control_recovery import StaleInputRecovery
 
 _LRESULT = ctypes.c_ssize_t
 _HOOKPROC = ctypes.WINFUNCTYPE(_LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
@@ -82,6 +83,8 @@ class _RawMouse(ctypes.Structure):
 
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
+_user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+_user32.GetAsyncKeyState.restype = ctypes.c_short
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _user32.SetWindowsHookExW.argtypes = [ctypes.c_int, _HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
 _user32.SetWindowsHookExW.restype = wintypes.HHOOK
@@ -133,6 +136,14 @@ _user32.GetRawInputData.argtypes = [
 _user32.GetRawInputData.restype = wintypes.UINT
 _user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 _user32.DefWindowProcW.restype = _LRESULT
+_user32.MsgWaitForMultipleObjectsEx.argtypes = [
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.DWORD,
+]
+_user32.MsgWaitForMultipleObjectsEx.restype = wintypes.DWORD
 _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 _kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
 _wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
@@ -147,6 +158,14 @@ _wts.WTSQuerySessionInformationW.restype = wintypes.BOOL
 _wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
 
 _CHORD = {0x10, 0x11, 0x12, 0x08}
+
+# The hook pump must block instead of polling: low-level hooks are delivered on
+# the thread that installed them, so every millisecond spent idling there is
+# charged in full to the next SendInput caller (and to physical input).
+_QS_ALLINPUT = 0x04FF  # Keyboard, mouse, raw input, posted messages and timers.
+_MWMO_INPUTAVAILABLE = 0x0004  # Wake on input already queued, not just new input.
+_MWMO_ALERTABLE = 0x0002  # Same alertability GetMessage gives a normal UI pump.
+_IDLE_WAIT_MS = 10  # Upper bound on how long the pump may stay idle between ticks.
 
 
 def _key(vk: int) -> int:
@@ -236,6 +255,7 @@ def _interactive_desktop() -> bool:
 
 def run_input_monitor(owner: Any) -> None:
     """Pump the Win32 hooks and raw input for one control coordinator."""
+    recovery = StaleInputRecovery()  # Never carry confirmations across a restart.
     name = f"WindowsMCPControl{threading.get_ident()}"
     instance = _kernel32.GetModuleHandleW(None)
     owner._mouse_callback = _HOOKPROC(owner._physical_mouse)
@@ -278,23 +298,28 @@ def run_input_monitor(owner: Any) -> None:
             while _user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
                 _user32.TranslateMessage(ctypes.byref(msg))
                 _user32.DispatchMessageW(ctypes.byref(msg))
-            for _ in range(128):
-                try:
-                    event = owner._events.get_nowait()
-                except queue.Empty:
-                    break
-                owner._handle(event)
-            owner._handle(("tick",))
+            # Only this thread mutates physical sets. Never wait for business
+            # locks here: a sender may hold them while Windows calls our hooks.
+            recovery.sample(owner, time.monotonic(), lambda vk: _user32.GetAsyncKeyState(vk))
             if owner._rotate or time.monotonic() - last_rotate >= 5.0:
                 owner._rotating = True  # Pause AI without letting physical down leak.
                 try:
-                    owner._install_hooks(instance)
+                    # Clear before installation so a new fault can request another.
                     owner._rotate = False
+                    fault = owner._fault_token
+                    owner._install_hooks(instance)
                     last_rotate = time.monotonic()
-                    owner._recover_after_rehook()
+                    owner._rehook_completed = fault
+                    owner._release_requested.set()
                 finally:
                     owner._rotating = False
-            time.sleep(0.01)
+            # Block until there is something to pump instead of sleeping past it.
+            # A low-level hook is delivered on this thread, so an unconditional
+            # sleep here is a fixed tax on the latency of every injected and
+            # physical event: it wakes only when input actually arrives.
+            _user32.MsgWaitForMultipleObjectsEx(
+                0, None, _IDLE_WAIT_MS, _QS_ALLINPUT, _MWMO_INPUTAVAILABLE | _MWMO_ALERTABLE
+            )
     except Exception as exc:
         owner._startup_error = exc
         owner._fail_open()

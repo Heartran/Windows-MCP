@@ -4,30 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 20 tools via FastMCP:
+Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 21 tools via FastMCP:
 
 | Group | Tools |
 |---|---|
 | Capture | `Screenshot`, `Snapshot`, `Scrape`, `DisplayInventory` |
 | Input | `Click`, `Type`, `Scroll`, `Move` (also drag-and-drop via `drag=True`), `Shortcut`, `MultiSelect`, `MultiEdit` |
 | Timing | `Wait`, `WaitFor` |
-| System | `App`, `PowerShell`, `FileSystem`, `Registry`, `Process`, `Clipboard`, `Notification` |
+| System | `App`, `PowerShell`, `FileSystem`, `Registry`, `Process`, `Clipboard`, `Notification`, `ControlStatus` |
 
-Tool names are defined by the `name=` argument of each `@mcp.tool(...)` in `src/windows_mcp/tools/`; that directory is the source of truth. Note the shell tool is registered as `PowerShell`, not `Shell`. Any subset can be removed at startup with `--disable-tools` (e.g. `--disable-tools PowerShell,Registry`).
+Tool names are defined by the `name=` argument of each `@mcp.tool(...)` in `src/windows_mcp/tools/`; that directory is the source of truth. Note the shell tool is registered as `PowerShell`, not `Shell`. Any subset can be removed at startup with `serve --exclude-tools` (e.g. `windows-mcp serve --exclude-tools PowerShell,Registry`).
 
 ## Build & Development Commands
 
 ```bash
-uv sync                    # Install dependencies
-uv run windows-mcp         # Run the MCP server
-ruff format .              # Format code
-ruff check .               # Lint code
-ruff check --fix .         # Lint and auto-fix
-pytest                     # Run all tests
-pytest tests/test_foo.py   # Run a single test file
+uv sync --extra dev        # Install runtime and development dependencies
+uv run windows-mcp serve   # Run the MCP server
+uv run --extra dev ruff format .  # Format code
+uv run --extra dev ruff check .   # Lint code
+uv run --extra dev ruff check --fix .  # Lint and auto-fix
+uv run --extra dev pytest         # Run all tests
+uv run --extra dev pytest tests/test_desktop_views.py  # Run a single test file
 ```
 
-**Package manager**: UV (not pip). **Python**: 3.13+. **Build backend**: Hatchling.
+**Package manager**: UV (not pip). **Python**: 3.14+. **Build backend**: setuptools.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 
 **MCP App views** — `tools/ui/`: HTML pages served as `ui://` resources (MIME `text/html;profile=mcp-app`) for hosts that implement the MCP Apps extension, such as Claude Desktop and claude.ai. A tool opts in with `app=AppConfig(resource_uri=...)` on its `@mcp.tool(...)`, which FastMCP turns into `_meta.ui.resourceUri`; the host then renders the page in a sandboxed iframe and feeds it the tool arguments and result over JSON-RPC `postMessage` (`ui/notifications/tool-input`, `ui/notifications/tool-result`). Today only `PowerShell` has a view (`powershell.html`, a terminal-window rendering of command, output, exit code and duration); its result keeps the legacy `Response: ...\nStatus Code: N` text block as the only visible content and carries the same data as typed fields under `_meta["windows-mcp/powershell"]` for the page (not as `structuredContent`: hosts that do not render the view, such as Claude Desktop's unified Chat/Cowork surface, show structured content as raw JSON instead of the text). Pages must be self-contained (inline CSS/JS, no external origins) and are shipped via `[tool.setuptools.package-data]`. Hosts without MCP Apps ignore the metadata and show the text. The server declares the extension twice: FastMCP puts it in `capabilities.extensions`, which the MCP SDK strips on pre-2026 protocol eras (Claude Desktop pins local stdio extensions to such an era), so `__main__.py` also passes `experimental_capabilities={UI_EXTENSION_ID: {}}`, which survives the sieve.
 
-**Control gate** — `tools/control_notifications.py` + `desktop/control.py`: the `ControlToolGate` middleware refuses tool calls with `USER_CONTROL` while the user owns the desktop (any physical mouse/keyboard event in the last 10 seconds, typing a prompt included). Tools in `CONTROL_EXEMPT_TOOLS` (`PowerShell`, `FileSystem`, `Registry`, `Process`, `Clipboard`, `Notification`, `Wait`, `DisplayInventory`, `ControlStatus`) bypass it because they never inject input or touch windows, the screen, or the overlay; a new tool that does any of that must stay off the list.
+**Control gate** — `tools/control_notifications.py` + `desktop/control.py` + `tools/control_policy.py`: the `ControlToolGate` middleware refuses tool calls with `USER_CONTROL` while the user owns the desktop (any physical mouse/keyboard event within the idle timeout, 10 seconds by default, typing a prompt included). Which tools need desktop ownership is decided by one policy table in `control_policy.py`: `relaxed` (default) gates only direct input (`Click`, `Type`, `Scroll`, `Move`, `Shortcut`, `MultiSelect`, `MultiEdit`) and `App` `switch`/`resize`; `balanced` adds `PowerShell`, `Notification`, `App` launches, `Process` `kill` and `Clipboard` `set`; `strict` gates everything. Unclassified tools are gated, so a new tool or mode must be added to that table. `Screenshot` and `Snapshot` are never gated but still queue on the gate's call lock (`CAPTURE` / `serializes_with_control`), because `Desktop.get_screenshot()` pauses the control indicator and input suppression and would preempt a protected call running concurrently. Configured via `WINDOWS_MCP_CONTROL`, `WINDOWS_MCP_CONTROL_POLICY`, `WINDOWS_MCP_CONTROL_IDLE_TIMEOUT` or the matching CLI flags.
 
 **Desktop service** — `desktop/service.py`: High-level orchestrator. Manages window operations (launch, resize, switch), screenshots, mouse/keyboard actions, and clipboard. Interfaces with Tree service for UI element discovery. `desktop/views.py` defines data models: `DesktopState`, `Window`, `Size`, `BoundingBox`, `Status`.
 
@@ -90,4 +90,4 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 
 ## Security Context
 
-This server has **full system access** with no sandboxing. `PowerShell`, `FileSystem`, `Registry`, `Process`, and `App` can all perform irreversible operations, and there is no audit log or rollback. The recommended deployment target is a VM or Windows Sandbox. Use `--disable-tools` to drop the tools a given deployment does not need.
+This server has **full system access** with no sandboxing. `PowerShell`, `FileSystem`, `Registry`, `Process`, and `App` can all perform irreversible operations, and there is no audit log or rollback. The recommended deployment target is a VM or Windows Sandbox. Use `serve --exclude-tools` to drop the tools a given deployment does not need.

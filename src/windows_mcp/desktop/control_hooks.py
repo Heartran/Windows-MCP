@@ -27,9 +27,8 @@ def physical_mouse(owner: Any, code: int, wparam: int, lparam: int) -> int:
             return _user32.CallNextHookEx(owner._mouse_hook, code, wparam, lparam)
         valid = True
         owner._last_physical_event = time.monotonic()
-        if wparam == 0x200 and owner._suppress:
-            owner._fast_pending = True  # Pause AI before queued movement is processed.
-            owner.input_ledger.block_new()
+        # Motion is still swallowed, but does not interrupt AI until the raw
+        # movement accumulator confirms a deliberate takeover.
         button = _mouse_button(wparam, data.mouseData)
         if button:
             if button[1]:
@@ -43,12 +42,14 @@ def physical_mouse(owner: Any, code: int, wparam: int, lparam: int) -> int:
             owner._fail_open()
     except Exception:
         owner._fail_open()
+    result = _user32.CallNextHookEx(owner._mouse_hook, code, wparam, lparam)
     if valid and button:
         if button[1]:
-            owner._delivered_mouse.add(button[0])
+            if not result:  # A downstream hook can still swallow this down.
+                owner._delivered_mouse.add(button[0])
         else:
             owner._delivered_mouse.discard(button[0])
-    return _user32.CallNextHookEx(owner._mouse_hook, code, wparam, lparam)
+    return result
 
 
 def physical_key(owner: Any, code: int, wparam: int, lparam: int) -> int:
@@ -95,11 +96,13 @@ def physical_key(owner: Any, code: int, wparam: int, lparam: int) -> int:
             owner._fail_open()
     except Exception:
         owner._fail_open()
+    result = _user32.CallNextHookEx(owner._key_hook, code, wparam, lparam)
     if vk is not None and down:
-        owner._delivered_keys.add(vk)
+        if not result:  # Forwarding alone is not proof of delivery.
+            owner._delivered_keys.add(vk)
     elif vk is not None:
         owner._delivered_keys.discard(vk)
-    return _user32.CallNextHookEx(owner._key_hook, code, wparam, lparam)
+    return result
 
 
 def raw_input(owner: Any, lparam: int) -> None:
@@ -108,7 +111,5 @@ def raw_input(owner: Any, lparam: int) -> None:
     if raw is None:
         return  # Null devices can be touchpads; do not infer source.
     owner._last_physical_event = time.monotonic()
-    if owner._suppress:
-        owner._fast_pending = True
-        owner.input_ledger.block_new()
-    owner._queue(("raw", *raw))
+    # Preserve arrival time: queue latency must not join separate gestures.
+    owner._queue(("raw", *raw, owner._last_physical_event))

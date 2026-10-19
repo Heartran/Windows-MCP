@@ -20,6 +20,7 @@ from windows_mcp.infrastructure import (
 )
 from click.core import ParameterSource
 from fastmcp import FastMCP
+from fastmcp.apps import UI_EXTENSION_ID
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from textwrap import dedent
@@ -354,7 +355,19 @@ def _build_mcp() -> FastMCP:
                         await analytics.close()
                     control_loop = None
 
-    _mcp = FastMCP(name="windows-mcp", instructions=instructions, lifespan=lifespan)
+    _mcp = FastMCP(
+        name="windows-mcp",
+        instructions=instructions,
+        lifespan=lifespan,
+        # FastMCP advertises MCP Apps support under `capabilities.extensions`,
+        # but the SDK's per-version sieve drops that field on pre-2026 protocol
+        # eras, and Claude Desktop pins local (stdio) extensions to such an era
+        # ("Era probe verdict: legacy"). Hosts then see a server that never
+        # declared the UI extension and fall back to plain tool results. The
+        # `experimental` map survives the sieve and is where the extension was
+        # declared before SEP-2133, so advertise it there as well.
+        experimental_capabilities={UI_EXTENSION_ID: {}},
+    )
     _mcp.add_middleware(ControlToolGate(controller, notifier))
     register_all(_mcp, get_desktop=_get_desktop, get_analytics=_get_analytics)
     return _mcp

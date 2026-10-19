@@ -303,16 +303,33 @@
       .join("\n");
   }
 
-  function applyToolResult(params) {
-    params = params || {};
+  // The server puts the typed fields under _meta["windows-mcp/powershell"]
+  // (see build_powershell_result); structuredContent is accepted for older
+  // servers, and the text block is the last resort.
+  var META_KEY = "windows-mcp/powershell";
+
+  function typedFields(params) {
+    var meta = params._meta || params.meta;
+    if (meta && typeof meta === "object" && meta[META_KEY] && typeof meta[META_KEY] === "object") {
+      return meta[META_KEY];
+    }
     var sc = params.structuredContent;
     if (sc && typeof sc === "object" && ("output" in sc || "status_code" in sc)) {
-      if (typeof sc.command === "string") { state.command = sc.command; }
-      if (sc.timeout !== undefined) { state.timeout = sc.timeout; }
-      if (typeof sc.cwd === "string") { state.cwd = sc.cwd; }
-      state.output = sc.output;
-      state.statusCode = typeof sc.status_code === "number" ? sc.status_code : null;
-      state.durationMs = typeof sc.duration_ms === "number" ? sc.duration_ms : null;
+      return sc;
+    }
+    return null;
+  }
+
+  function applyToolResult(params) {
+    params = params || {};
+    var fields = typedFields(params);
+    if (fields) {
+      if (typeof fields.command === "string") { state.command = fields.command; }
+      if (fields.timeout !== undefined) { state.timeout = fields.timeout; }
+      if (typeof fields.cwd === "string") { state.cwd = fields.cwd; }
+      state.output = fields.output;
+      state.statusCode = typeof fields.status_code === "number" ? fields.status_code : null;
+      state.durationMs = typeof fields.duration_ms === "number" ? fields.duration_ms : null;
       state.phase = params.isError ? "error" : "done";
       render();
       return;

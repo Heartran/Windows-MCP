@@ -211,11 +211,17 @@ class ControlToolGate(Middleware):
             # Keep shared desktop operations serialized, without creating a lease.
             async with self._call_lock:
                 return await call_next(context)
-        from windows_mcp.tools.control_policy import requires_control
+        from windows_mcp.tools.control_policy import requires_control, serializes_with_control
 
         if not requires_control(
             self.controller.policy, name, getattr(context.message, "arguments", None)
         ):
+            if serializes_with_control(name):
+                # Screen capture pauses the control indicator and input suppression;
+                # overlapping an active lease would preempt it. Queue behind the
+                # lock, but never take a lease or wait for desktop ownership.
+                async with self._call_lock:
+                    return await call_next(context)
             # Background work neither waits for the desktop lock nor creates a lease.
             # Resource-specific serialization (such as the UIA worker) still applies.
             return await call_next(context)

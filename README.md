@@ -661,7 +661,11 @@ concerns desktop interference, not permissions or data safety. PowerShell can st
 operate the UI, and file/registry operations can have other side effects.
 
 Ungated calls do not acquire or extend the desktop lease, activate its indicator,
-or wait for its tool lock. Existing resource constraints still apply: UI Automation
+or wait for its tool lock. The exception is screen capture: Screenshot and Snapshot
+still queue behind the tool lock (without a lease or any ownership check), because a
+capture hides the control indicator and releases input suppression while it runs,
+which would preempt a protected call executing at the same time. Existing resource
+constraints still apply: UI Automation
 operations share a dedicated worker, so a long WaitFor can delay other UIA work.
 The separate screenshot flash is unchanged. `--no-control` retains its existing
 all-tools serialization and overrides the policy's ownership checks.

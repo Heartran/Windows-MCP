@@ -11,7 +11,13 @@ from fastmcp import Client, FastMCP
 from windows_mcp.desktop.control import ControlCoordinator
 from windows_mcp.tools import register_all
 from windows_mcp.tools.control_notifications import ControlNotifier, ControlToolGate
-from windows_mcp.tools.control_policy import CLASSIFIED_TOOLS, MODES, requires_control
+from windows_mcp.tools.control_policy import (
+    CAPTURE,
+    CLASSIFIED_TOOLS,
+    MODES,
+    requires_control,
+    serializes_with_control,
+)
 
 
 @pytest.mark.parametrize("policy", ["relaxed", "balanced", "strict"])
@@ -161,6 +167,60 @@ async def test_background_does_not_take_lock_or_lease(ending):
         assert owner._lease_until == 0
     finally:
         release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if gate._call_lock.locked():
+            gate._call_lock.release()
+
+
+def test_capture_tools_serialize_but_never_require_ownership():
+    assert CAPTURE == {"Screenshot", "Snapshot"}
+    for name in CAPTURE:
+        assert serializes_with_control(name)
+        assert not requires_control("relaxed", name)
+        assert not requires_control("balanced", name)
+    for name in ("PowerShell", "Wait", "FileSystem", "ControlStatus", "Click"):
+        assert not serializes_with_control(name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(CAPTURE))
+async def test_capture_waits_for_desktop_lock_without_a_lease(name):
+    """A capture must not overlap a protected call: get_screenshot pauses the
+    control indicator and input suppression, which would preempt that call."""
+    owner = ControlCoordinator()  # Default policy is relaxed; no hooks installed.
+    owner.status = Mock(side_effect=AssertionError("capture consulted ownership"))
+    owner.begin_call = Mock(side_effect=AssertionError("capture acquired lease"))
+    owner.end_call = Mock(side_effect=AssertionError("capture extended lease"))
+    gate = ControlToolGate(owner, SimpleNamespace(remember=lambda _: None))
+    captured = asyncio.Event()
+
+    async def capture(_):
+        captured.set()
+        return "captured"
+
+    # While a protected call holds the lock, the capture queues instead of running.
+    await gate._call_lock.acquire()
+    task = asyncio.create_task(gate.on_call_tool(context(name), capture))
+    try:
+        await asyncio.sleep(0.05)
+        assert not captured.is_set()
+        # A background tool is still not held back by the same lock.
+        assert (
+            await asyncio.wait_for(
+                gate.on_call_tool(context("PowerShell"), lambda _: asyncio.sleep(0, result="bg")),
+                2,
+            )
+            == "bg"
+        )
+        gate._call_lock.release()
+        assert await asyncio.wait_for(task, 2) == "captured"
+        # The lock was released again, and no ownership state was touched.
+        await asyncio.wait_for(gate._call_lock.acquire(), 2)
+        gate._call_lock.release()
+        owner.begin_call.assert_not_called()
+        owner.end_call.assert_not_called()
+    finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         if gate._call_lock.locked():

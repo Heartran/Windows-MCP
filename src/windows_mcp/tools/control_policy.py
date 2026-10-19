@@ -31,6 +31,18 @@ MODES = {
 }
 CLASSIFIED_TOOLS = DIRECT | POSSIBLE | OTHER | MODES.keys() | {"ControlStatus"}
 
+# Screen capture never needs desktop ownership, but `Desktop.get_screenshot()`
+# hides the control indicator and releases input suppression for the duration
+# of the capture (`pause_for_capture`). Overlapping a protected call would make
+# that call fail its next checkpoint with CONTROL_PREEMPTED although nobody took
+# the desktop over, so these tools queue on the gate's call lock without a lease.
+CAPTURE = frozenset({"Screenshot", "Snapshot"})
+
+
+def serializes_with_control(name: str) -> bool:
+    """Whether an ungated tool must still wait for the desktop call lock."""
+    return name in CAPTURE
+
 
 def requires_control(policy: str, name: str, arguments: dict | None = None) -> bool:
     """Decide before taking the ownership lock; never inspect arbitrary scripts."""
